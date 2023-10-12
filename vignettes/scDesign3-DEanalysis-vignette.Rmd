@@ -48,16 +48,13 @@ library(Seurat)
 library(SeuratObject)
 library(scran)
 library(parallel)
-library(monocle3)
 library(DESeq2)
 library(BiocParallel)
 library(NBAMSeq)
-library(PseudotimeDE)
 library(dplyr)
 library(tradeSeq)
 library(reshape2)
 library(spatialDE)
-library(SPARK)
 library(scales)
 library(tidyr)
 theme_set(theme_bw())
@@ -365,26 +362,12 @@ logcounts(simu_sce) <- log1p(counts(simu_sce))
 ### DE genes identification
 Now, we use the simulated data to benchmark the performance of four DEG identification methods. The p-values from the two methods after Benjamini-Hochberg(BH) corretion will be stored in `qvals` in the following code.
 ```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
-qvals <- matrix(0, ncol = 4, nrow = dim(simu_sce)[1])
-colnames(qvals) <- c("Monocle3-DE","tradeSeq","NBAMseq","PseudotimeDE")
+qvals <- matrix(0, ncol = 2, nrow = dim(simu_sce)[1])
+colnames(qvals) <- c("tradeSeq","NBAMseq")
 rownames(qvals) <- rownames(simu_sce)
 ```
 
-####  Monocle3 
-We follow the [tutorial](https://cole-trapnell-lab.github.io/monocle3/docs/differential/) from `Monocle3` to conduct the DE test and obtain the p-values after BH correction.
-```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
-rowdata <- rowData(simu_sce)
-rowdata$gene_short_name <- rownames(rowData(simu_sce))
-coldata <- colData(simu_sce)
-cds <- new_cell_data_set(counts(simu_sce),
-                           cell_metadata = coldata,
-                           gene_metadata = rowdata)
-gene_fits <- fit_models(cds, model_formula_str = "~pseudotime")
-fit_coefs <- coefficient_table(gene_fits)
-fit <- fit_coefs %>% dplyr::filter(term == "pseudotime") %>% dplyr::select(p_value, q_value) %>% dplyr::mutate(gene = rownames(simu_sce))
-fit
-qvals[fit$gene,"Monocle3-DE"] <- fit$q_value
-```
+
 #### tradeSeq
 We follow the [tutorial](https://statomics.github.io/tradeSeq/articles/tradeSeq.html) from `tradeSeq` to conduct the DE test and obtain the p-values after BH correction.
 ```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
@@ -409,18 +392,6 @@ gsd = NBAMSeq(gsd)
 res1 = NBAMSeq::results(gsd, name = "pseudotime")
 head(res1)
 qvals[rownames(res1),"NBAMseq"] = res1$padj
-```
-
-#### PseudotimeDE
-We follow the [tutorial](https://htmlpreview.github.io/?https://rpubs.com/dongyuansong/842884) from `PseudotimeDE` to conduct the DE test and obtain the p-values after BH correction. Here to save computational time, we use the fix-mode of PseudotimeDE.
-```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
-ori_tbl <- tibble(cell = colnames(simu_sce), pseudotime = colData(simu_sce)$pseudotime)
-res <- runPseudotimeDE(gene.vec = rownames(simu_sce),
-                                     ori.tbl = ori_tbl,
-                                     sub.tbl = NULL, 
-                                     mat = simu_sce, 
-                                     model = "nb")
-qvals[res$gene,"PseudotimeDE"] <- p.adjust(res$fix.pv, method = "BH", length(res$gene))
 ```
 
 Since `tradeSeq`'s result contains some NA, we convert the NA to 1 first.
@@ -493,13 +464,6 @@ print(example_sce)
 To save time, we subset the top 200 genes.
 ```{r, message=FALSE}
 example_sce <- example_sce[1:200, ]
-```
-We remove the mitochondrial genes since this is a preprocessing step in SPARK-X, which is one of the method we will use to identify spatially variable genes.
-```{r}
-mt_idx<- grep("mt-",rownames(example_sce))
-if(length(mt_idx)!=0){
-    example_sce   <- example_sce[-mt_idx,]
-}
 ```
 
 ### Simulation
@@ -650,8 +614,8 @@ as_tibble(long, rownames = "Cell") %>% ggplot(aes(x = x, y = y, color = Expressi
 ### SVG identification
 Now, we use the simulated data to benchmark the performance of three SVG identification methods. The p-values from the two methods after Benjamini-Hochberg(BH) correction will be stored in `qvals` in the following code.
 ```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
-qvals <- matrix(0, ncol = 3, nrow = dim(simu_sce)[1])
-colnames(qvals) <- c("spatialDE","SPARK","SPARK-X")
+qvals <- matrix(0, ncol = 1, nrow = dim(simu_sce)[1])
+colnames(qvals) <- c("spatialDE")
 rownames(qvals) <- rownames(simu_sce)
 ```
 
@@ -673,50 +637,8 @@ rownames(results_spatialDE) <- results_spatialDE$g
 qvals[,"spatialDE"] <- results_spatialDE[rownames(simu_sce),"qval"]
 ```
 
-#### SPARK
-We then follow the [tutorial](https://xzhoulab.github.io/SPARK/02_SPARK_Example/) from `SPARK` to conduct the hypothesis test and obtain the p-values after BH correction.
-```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
-rawcount <- counts(simu_sce)
-info <- as.data.frame(colData(simu_sce)[, c("spatial1","spatial2")])
-colnames(info) <- c("x","y")
-info$total_count <- apply(rawcount,2,sum)
-rownames(info) <- colnames(rawcount)
-spark <- CreateSPARKObject(counts=rawcount, 
-                             location=info[,1:2],
-                             percentage = 0, 
-                             min_total_counts = 10)
-spark@lib_size <- apply(spark@counts, 2, sum)
-spark <- spark.vc(spark, 
-                   covariates = NULL, 
-                   lib_size = spark@lib_size, 
-                   num_core = 2,
-                   verbose = FALSE)
-spark <- spark.test(spark, 
-                     check_positive = TRUE, 
-                     verbose = FALSE)
-qvals[,"SPARK"] <- spark@res_mtest$adjusted_pvalue
-```
-
-#### SPARK-X
-We then follow the [tutorial](https://xzhoulab.github.io/SPARK/02_SPARK_Example/) from `SPARK-X` to conduct the hypothesis test and obtain the p-values after BH correction.
-```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
-sp_count <- counts(simu_sce)
-info <- as.data.frame(colData(simu_sce)[, c("spatial1","spatial2")])
-colnames(info) <- c("x","y")
-info$total_count <- apply(sp_count ,2,sum)
-rownames(info) <- colnames(sp_count )
-location <- as.matrix(info)
-mt_idx      <- grep("mt-",rownames(sp_count))
-if(length(mt_idx)!=0){
-    sp_count    <- sp_count[-mt_idx,]
-}
-sparkX <- sparkx(sp_count,location,numCores=1,option="mixture")
-head(sparkX$res_mtest)
-qvals[,"SPARK-X"] <-sparkX$res_mtest$adjustedPval
-```
-
-Since we manually created non-SVG in the `extra_para()` step, now we can calculate the actual false discovery proportion(FDP) and power of the tests we conducted above with various target FDR threshold.
-```{r, message=FALSE, warning=FALSE, results='hide', eval=TRUE}
+Since we manually created non-SVG in the extra_para() step, now we can calculate the actual false discovery proportion(FDP) and power of the tests we conducted above with various target FDR threshold.
+```{r, message=FALSE, warning=FALSE, results='hide'}
 test = colnames(qvals)
 targetFDR <- c(0.01,0.05,0.1,0.2,0.5)
 de <- de_idx
@@ -757,7 +679,7 @@ for (t in 1:length(test)) {
 }
 ```
 
-Lastly, we visualize the Target FDR vs Actual FDP and Target FDR vs Power below.
+Then, we visualize the Target FDR vs Actual FDP and Target FDR vs Power below.
 ```{r, message=FALSE, warning=FALSE, results='hide'}
 fdp_long <- melt(fdp_mat)
 colnames(fdp_long) <- c("Target FDR","test_method","Actual FDP")
